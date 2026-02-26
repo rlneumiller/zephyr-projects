@@ -1,0 +1,29 @@
+/ {
+	aliases {
+		bridge-uart = &uart0;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+};
+
+&spi2 {
+	status = "disabled";
+};
+
+&pinctrl {
+	uart0_default: uart0_default {
+		group1 {
+			pinmux = <UART0_TX_GPIO4>;
+			output-high;
+		};
+		group2 {
+			pinmux = <UART0_RX_GPIO5>;
+			bias-pull-up;
+		};
+	};
+};
