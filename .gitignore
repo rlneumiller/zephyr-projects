@@ -416,3 +416,37 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Zephyr and West
+.west/
+zephyr/
+modules/
+bootloader/
+tools/
+
+# Build artifacts
+build/
+build_*/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Python virtual environment
+.venv/
+__pycache__/
+
+# Zephyr SDK and archives
+zephyr-sdk-*/
+*.tar.xz
+*.tar.gz
+*.zip
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
