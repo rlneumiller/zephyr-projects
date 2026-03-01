@@ -1,3 +1,6 @@
 {
-    "git.autoRepositoryDetection": false
+    "git.autoRepositoryDetection": false,
+    "C_Cpp.files.exclude": {
+        "**/zephyr/**": true
+    }
 }
