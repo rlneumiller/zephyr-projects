@@ -49,6 +49,29 @@ RING_BUF_DECLARE(uart_rx_ringbuf, RING_BUF_SIZE);
 RING_BUF_DECLARE(tcp_rx_ringbuf, RING_BUF_SIZE);
 RING_BUF_DECLARE(cmd_response_ringbuf, CMD_RESPONSE_BUF_SIZE);
 
+static void log_printer_data(uint8_t *buf, size_t len)
+{
+	static char line_buf[128];
+	static size_t line_pos = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] == '\r' || buf[i] == '\n') {
+			if (line_pos > 0) {
+				line_buf[line_pos] = '\0';
+				// Look for temperature reports like "T:21.0 /0.0 B:21.0 /0.0"
+				if (strstr(line_buf, "T:") && strstr(line_buf, "B:")) {
+					LOG_INF("Printer says: %s", line_buf);
+				} else {
+					LOG_INF("Printer sent to Octoprint: %s", line_buf);
+				}
+				line_pos = 0;
+			}
+		} else if (line_pos < sizeof(line_buf) - 1) {
+			line_buf[line_pos++] = buf[i];
+		}
+	}
+}
+
 const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(bridge_uart));
 static int client_socket = -1;
 static uint32_t last_printer_activity_ms = 0;
@@ -579,7 +602,7 @@ static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 			// 2. Read from UART ringbuf, write to TCP
 			len = ring_buf_get(&uart_rx_ringbuf, rx_buf, sizeof(rx_buf));
 			if (len > 0) {
-				LOG_INF("UART (Printer) -> TCP (Octoprint?): %d bytes", len);
+				log_printer_data(rx_buf, len);
 				int sent = 0;
 				while (sent < len) {
 					int ret = zsock_send(client_socket, rx_buf + sent, len - sent, 0);
