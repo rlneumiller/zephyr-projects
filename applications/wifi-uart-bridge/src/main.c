@@ -35,17 +35,24 @@ LOG_MODULE_REGISTER(wifi_uart_bridge, LOG_LEVEL_INF);
 #define RING_BUF_SIZE 1024
 #define WEB_SERVER_STACK_SIZE 4096
 #define WEB_SERVER_PRIORITY 7
+#define TCP_SERVER_STACK_SIZE 4096
+#define TCP_SERVER_PRIORITY 7
 #define WEB_SERVER_REQ_BUF_SIZE 192
 #define WEB_SERVER_BODY_BUF_SIZE 512
-#define WEB_SERVER_HTML_BUF_SIZE 1024
-#define WEB_SERVER_RESP_BUF_SIZE 1400
+#define WEB_SERVER_HTML_BUF_SIZE 2048
+#define WEB_SERVER_RESP_BUF_SIZE 4096
+#define CMD_RESPONSE_BUF_SIZE 2048
+#define CMD_RECV_TIMEOUT_MS 5000
 
 // Globals
 RING_BUF_DECLARE(uart_rx_ringbuf, RING_BUF_SIZE);
 RING_BUF_DECLARE(tcp_rx_ringbuf, RING_BUF_SIZE);
+RING_BUF_DECLARE(cmd_response_ringbuf, CMD_RESPONSE_BUF_SIZE);
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(bridge_uart));
 static int client_socket = -1;
+
+static bool command_response_pending = false;
 
 static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
@@ -53,6 +60,8 @@ static K_SEM_DEFINE(wifi_connected, 0, 1);
 static K_SEM_DEFINE(ipv4_address_obtained, 0, 1);
 K_THREAD_STACK_DEFINE(web_server_stack, WEB_SERVER_STACK_SIZE);
 static struct k_thread web_server_thread_data;
+K_THREAD_STACK_DEFINE(tcp_server_stack, TCP_SERVER_STACK_SIZE);
+static struct k_thread tcp_server_thread_data;
 
 // Avoid requiring stack allocations in the web server thread for handling requests by using global buffers.
 static char web_server_req_buf[WEB_SERVER_REQ_BUF_SIZE];
@@ -65,6 +74,13 @@ static char device_ip[NET_IPV4_ADDR_LEN];
 
 static bool wifi_is_connected;
 static int wifi_connect_result = -ETIMEDOUT;
+
+static size_t get_web_server_stack_usage(void)
+{
+	size_t unused = 0;
+	k_thread_stack_space_get(&web_server_thread_data, &unused);
+	return WEB_SERVER_STACK_SIZE - unused;
+}
 
 static int send_all(int sock, const char *buf, size_t len)
 {
@@ -106,6 +122,9 @@ static void uart_isr(const struct device *dev, void *user_data)
 		int len = uart_fifo_read(dev, buffer, sizeof(buffer));
 		if (len > 0) {
 			ring_buf_put(&uart_rx_ringbuf, buffer, len);
+			if (command_response_pending) {
+				ring_buf_put(&cmd_response_ringbuf, buffer, len);
+			}
 		}
 	}
 
@@ -228,6 +247,7 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 		socklen_t client_addr_len = sizeof(client_addr);
 		bool is_status_path = false;
 		bool is_root_path = false;
+		bool is_send_m115_path = false;
 		int req_len;
 		int body_len;
 		int html_len;
@@ -249,15 +269,18 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 			is_status_path = true;
 		} else if (strncmp(web_server_req_buf, "GET / ", 6) == 0) {
 			is_root_path = true;
+		} else if (strncmp(web_server_req_buf, "GET /send_m115", 14) == 0) {
+			is_send_m115_path = true;
 		}
 
 		if (is_status_path) {
 			snprintk(web_server_body_buf, sizeof(web_server_body_buf),
-				"{\"device_ip\":\"%s\",\"wifi_connected\":%s,\"bridge_client_connected\":%s,\"uptime_ms\":%lld}\n",
+				"{\"device_ip\":\"%s\",\"wifi_connected\":%s,\"bridge_client_connected\":%s,\"uptime_ms\":%lld,\"web_stack_used_bytes\":%zu}\n",
 				device_ip[0] ? device_ip : "0.0.0.0",
 				wifi_is_connected ? "true" : "false",
 				client_socket >= 0 ? "true" : "false",
-				(long long)k_uptime_get());
+				(long long)k_uptime_get(),
+				get_web_server_stack_usage());
 			body_len = strlen(web_server_body_buf);
 
 			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
@@ -277,6 +300,9 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 				"<p><strong>Bridge Client Connected:</strong> %s</p>"
 				"<p><strong>Uptime (ms):</strong> %lld</p>"
 				"<p>JSON endpoint: <a href=\"/status\">/status</a></p>"
+				"<p><button onclick=\"sendM115()\">Send M115</button></p>"
+				"<div id=\"response\"></div>"
+				"<script>function sendM115(){fetch('/send_m115').then(r=>r.text()).then(d=>document.getElementById('response').textContent=d);}</script>"
 				"</body></html>",
 				device_ip[0] ? device_ip : "0.0.0.0",
 				wifi_is_connected ? "true" : "false",
@@ -292,6 +318,40 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 				"%s",
 				html_len, web_server_html_buf);
 			resp_len = strlen(web_server_resp_buf);
+		} else if (is_send_m115_path) {
+			// Send M115 command and collect response
+			ring_buf_reset(&cmd_response_ringbuf);
+			const char *cmd = "M115\n";
+			ring_buf_put(&tcp_rx_ringbuf, (uint8_t *)cmd, strlen(cmd));
+			uart_irq_tx_enable(uart_dev);
+			command_response_pending = true;
+			uint32_t start_time = k_uptime_get();
+			uint8_t resp_buf[CMD_RESPONSE_BUF_SIZE];
+			size_t resp_len_local = 0;
+			while (k_uptime_get() - start_time < CMD_RECV_TIMEOUT_MS && resp_len_local < CMD_RESPONSE_BUF_SIZE) {
+				uint32_t len = ring_buf_get(&cmd_response_ringbuf, resp_buf + resp_len_local, CMD_RESPONSE_BUF_SIZE - resp_len_local);
+				if (len > 0) {
+					resp_len_local += len;
+					start_time = k_uptime_get(); // reset timeout on data
+				}
+				k_sleep(K_MSEC(10));
+			}
+			command_response_pending = false;
+			// Send response
+			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
+				"HTTP/1.1 200 OK\r\n"
+				"Content-Type: text/plain\r\n"
+				"Connection: close\r\n"
+				"Content-Length: %zu\r\n\r\n",
+				resp_len_local);
+			size_t header_len = strlen(web_server_resp_buf);
+			if (header_len + resp_len_local <= sizeof(web_server_resp_buf)) {
+				memcpy(web_server_resp_buf + header_len, resp_buf, resp_len_local);
+				resp_len = header_len + resp_len_local;
+			} else {
+				// Fallback if too big, but shouldn't happen
+				resp_len = 0;
+			}
 		} else {
 			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
 				"HTTP/1.1 404 Not Found\r\n"
@@ -434,8 +494,11 @@ static void wifi_connect(void)
 }
 
 // TCP Server
-static void tcp_server_thread(void)
+static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 {
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
 	int serv_sock;
 	struct sockaddr_in bind_addr = {
 		.sin_family = AF_INET,
@@ -459,7 +522,7 @@ static void tcp_server_thread(void)
 		return;
 	}
 
-	LOG_INF("TCP server listening on port %d", BRIDGE_PORT);
+	LOG_INF("TCP (Bridge) server listening on port %d", BRIDGE_PORT);
 
 	while (1) {
 		struct sockaddr_in client_addr;
@@ -553,7 +616,25 @@ int main(void)
 				K_NO_WAIT);
 	k_thread_name_set(&web_server_thread_data, "web_status_server");
 
-	tcp_server_thread();
+	k_thread_create(&tcp_server_thread_data,
+				tcp_server_stack,
+				K_THREAD_STACK_SIZEOF(tcp_server_stack),
+				tcp_server_thread,
+				NULL, NULL, NULL,
+				TCP_SERVER_PRIORITY,
+				0,
+				K_NO_WAIT);
+	k_thread_name_set(&tcp_server_thread_data, "tcp_bridge_server");
+
+	// Log stack usage periodically from the main loop
+	while (1) {
+		size_t used = get_web_server_stack_usage();
+		LOG_INF("Web server stack usage: %zu/%d bytes (%.1f%%)", 
+			used, 
+			WEB_SERVER_STACK_SIZE,
+			(float)used * 100.0f / WEB_SERVER_STACK_SIZE);
+		k_sleep(K_SECONDS(10));
+	}
 
 	return 0;
 }
