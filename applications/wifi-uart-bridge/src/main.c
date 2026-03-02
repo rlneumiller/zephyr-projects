@@ -51,6 +51,7 @@ RING_BUF_DECLARE(cmd_response_ringbuf, CMD_RESPONSE_BUF_SIZE);
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(bridge_uart));
 static int client_socket = -1;
+static uint32_t last_printer_activity_ms = 0;
 
 static bool command_response_pending = false;
 
@@ -121,6 +122,7 @@ static void uart_isr(const struct device *dev, void *user_data)
 		uint8_t buffer[64];
 		int len = uart_fifo_read(dev, buffer, sizeof(buffer));
 		if (len > 0) {
+			last_printer_activity_ms = k_uptime_get_32();
 			ring_buf_put(&uart_rx_ringbuf, buffer, len);
 			if (command_response_pending) {
 				ring_buf_put(&cmd_response_ringbuf, buffer, len);
@@ -134,6 +136,7 @@ static void uart_isr(const struct device *dev, void *user_data)
 		if (size > 0) {
 			int written = uart_fifo_fill(dev, tx_data, size);
 			if (written < size) {
+				LOG_WRN("UART TX buffer full, dropping %d bytes", size - written);
 				// Generally the commands we transmit will be quite small, 
 				// so we'll skip implementing retries for now to keep it simple.
 			}
@@ -275,11 +278,11 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 
 		if (is_status_path) {
 			snprintk(web_server_body_buf, sizeof(web_server_body_buf),
-				"{\"device_ip\":\"%s\",\"wifi_connected\":%s,\"bridge_client_connected\":%s,\"uptime_ms\":%lld,\"web_stack_used_bytes\":%zu}\n",
+				"{\"device_ip\":\"%s\",\"wifi_connected\":%s,\"bridge_client_connected\":%s,\"last_printer_activity_ms\":%u,\"web_stack_used_bytes\":%zu}\n",
 				device_ip[0] ? device_ip : "0.0.0.0",
 				wifi_is_connected ? "true" : "false",
 				client_socket >= 0 ? "true" : "false",
-				(long long)k_uptime_get(),
+				last_printer_activity_ms,
 				get_web_server_stack_usage());
 			body_len = strlen(web_server_body_buf);
 
@@ -292,22 +295,42 @@ static void web_server_thread(void *arg1, void *arg2, void *arg3)
 				body_len, web_server_body_buf);
 			resp_len = strlen(web_server_resp_buf);
 		} else if (is_root_path) {
+			uint32_t now = k_uptime_get_32();
+			uint32_t last_activity = last_printer_activity_ms;
+			char last_activity_str[64];
+			
+			if (last_activity == 0) {
+				strcpy(last_activity_str, "Never");
+			} else {
+				uint32_t diff = (now - last_activity) / 1000;
+				snprintk(last_activity_str, sizeof(last_activity_str), "%u seconds ago", diff);
+			}
+
 			snprintk(web_server_html_buf, sizeof(web_server_html_buf),
 				"<!doctype html><html><head><meta charset=\"utf-8\"><title>WiFi UART Bridge Status</title></head>"
 				"<body><h1>WiFi UART Bridge</h1>"
 				"<p><strong>Device IP:</strong> %s</p>"
 				"<p><strong>WiFi Connected:</strong> %s</p>"
-				"<p><strong>Bridge Client Connected:</strong> %s</p>"
-				"<p><strong>Uptime (ms):</strong> %lld</p>"
+				"<p><strong>Bridge Client (Octoprint?) Connected:</strong> %s</p>"
+				"<p><strong>Last Printer Response:</strong> %s</p>"
 				"<p>JSON endpoint: <a href=\"/status\">/status</a></p>"
 				"<p><button onclick=\"sendM115()\">Send M115</button></p>"
 				"<div id=\"response\"></div>"
-				"<script>function sendM115(){fetch('/send_m115').then(r=>r.text()).then(d=>document.getElementById('response').textContent=d);}</script>"
+				"<script>"
+				"function sendM115(){"
+				"  document.getElementById('response').textContent='Sending...';"
+				"  fetch('/send_m115').then(r=>r.text()).then(d=>{"
+				"    document.getElementById('response').textContent=d;"
+				"    location.reload();"
+				"  });"
+				"}"
+				"setInterval(() => { if(document.getElementById('response').textContent==='') location.reload(); }, 5000);"
+				"</script>"
 				"</body></html>",
 				device_ip[0] ? device_ip : "0.0.0.0",
 				wifi_is_connected ? "true" : "false",
 				client_socket >= 0 ? "true" : "false",
-				(long long)k_uptime_get());
+				last_activity_str);
 			html_len = strlen(web_server_html_buf);
 
 			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
@@ -535,7 +558,7 @@ static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 			continue;
 		}
 
-		LOG_INF("Bridge Client connected on port %d", BRIDGE_PORT);
+		LOG_INF("Bridge Client (Octoprint?)connected on port %d", BRIDGE_PORT);
 
 		while (1) {
 			uint8_t rx_buf[128];
@@ -543,11 +566,11 @@ static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 			// 1. Read from TCP, write to UART ringbuf
 			int len = zsock_recv(client_socket, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT);
 			if (len > 0) {
-				LOG_INF("TCP -> UART: %d bytes", len);
+				LOG_INF("TCP (Octoprint?) -> UART (Printer): %d bytes", len);
 				ring_buf_put(&tcp_rx_ringbuf, rx_buf, len);
 				uart_irq_tx_enable(uart_dev);
 			} else if (len == 0 || (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-				LOG_INF("Bridge Client disconnected from port %d", BRIDGE_PORT);
+				LOG_INF("Bridge Client (Octoprint?) disconnected from port %d", BRIDGE_PORT);
 				zsock_close(client_socket);
 				client_socket = -1;
 				break;
@@ -556,7 +579,7 @@ static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 			// 2. Read from UART ringbuf, write to TCP
 			len = ring_buf_get(&uart_rx_ringbuf, rx_buf, sizeof(rx_buf));
 			if (len > 0) {
-				LOG_INF("UART -> TCP: %d bytes", len);
+				LOG_INF("UART (Printer) -> TCP (Octoprint?): %d bytes", len);
 				int sent = 0;
 				while (sent < len) {
 					int ret = zsock_send(client_socket, rx_buf + sent, len - sent, 0);
@@ -629,10 +652,10 @@ int main(void)
 	// Log stack usage periodically from the main loop
 	while (1) {
 		size_t used = get_web_server_stack_usage();
-		LOG_INF("Web server stack usage: %zu/%d bytes (%.1f%%)", 
+		LOG_INF("Web server stack usage: %zu/%d bytes (%zu%%)", 
 			used, 
 			WEB_SERVER_STACK_SIZE,
-			(float)used * 100.0f / WEB_SERVER_STACK_SIZE);
+			(used * 100) / WEB_SERVER_STACK_SIZE);
 		k_sleep(K_SECONDS(10));
 	}
 
