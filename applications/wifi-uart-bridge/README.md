@@ -5,7 +5,7 @@ This Zephyr-based application bridges a WiFi TCP connection to a UART interface,
 > [!IMPORTANT]
 > **Hardware Patching Required**:
 > To interface with a 3D printer, you must tap into the UART lines on the printer's mainboard.
-> For common CH340G implementations (16-pin chip), **TX** and **RX** are typically **pins 2 and 3**. Connect these to their counterparts on your esp32c3 (in prj.conf I disabled SPI2 and assigned pins 4 and 5 to uart0).
+> For common CH340G implementations (16-pin chip), **TX** and **RX** are typically **pins 2 and 3**. Connect these to their counterparts on your esp32c3 (in app.overlay I disabled SPI2 and assigned pins 4 and 5 to uart0).
 
 ## Features
 
