@@ -45,3 +45,9 @@ west flash
 - **Console via serial port ttyACMx**: View real-time logs including temperature reports and stack usage.
 - **Web**: Access `http://<device_ip>` to check status and send test commands.
 - **OctoPrint**: Configure a RAW TCP connection to `<device_ip>:8080`.
+
+## ESP32-C3 Supermini memory resources
+
+- **400 KB SRAM**
+- **384 KB ROM**
+- **4 MB flash**
