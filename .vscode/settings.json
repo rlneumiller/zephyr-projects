@@ -2,5 +2,26 @@
     "git.autoRepositoryDetection": false,
     "C_Cpp.files.exclude": {
         "**/zephyr/**": true
-    }
+    },
+    "C_Cpp.workspaceParsingPriority": "low",
+    "C_Cpp.intelliSenseCacheSize": 512,
+    "C_Cpp.exclusionPolicy": "checkFilesAndFolders",
+    "files.exclude": {
+        "**/build*/**": true,
+        "**/modules/**": true,
+        "**/zephyr/**": true
+    },
+    "cmake.sourceDirectory": "/home/arrel/gits/zephyr-projects/applications/wifi-uart-bridge",
+    "cmake.environment": {
+        "ZEPHYR_BASE": "/home/arrel/gits/zephyr-projects/zephyr",
+        "ZEPHYR_SDK_INSTALL_DIR": "/home/arrel/gits/zephyr-projects/zephyr-sdk-0.17.4",
+        "PYTHON_EXECUTABLE": "/home/arrel/gits/zephyr-projects/.venv/bin/python3",
+        "ESP_IDF_PATH": "/home/arrel/gits/zephyr-projects/modules/hal/espressif",
+        "ZEPHYR_HAL_ESPRESSIF_MODULE_DIR": "/home/arrel/gits/zephyr-projects/modules/hal/espressif"
+    },
+    "cmake.options.additionalArgs": [
+        "-DPYTHON_EXECUTABLE=/home/arrel/gits/zephyr-projects/.venv/bin/python3",
+        "-DESP_IDF_PATH=/home/arrel/gits/zephyr-projects/modules/hal/espressif",
+        "-DZEPHYR_HAL_ESPRESSIF_MODULE_DIR=/home/arrel/gits/zephyr-projects/modules/hal/espressif"
+    ]
 }

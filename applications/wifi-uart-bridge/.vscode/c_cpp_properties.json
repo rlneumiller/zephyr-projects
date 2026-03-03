@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Zephyr",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/home/arrel/gits/zephyr-projects/zephyr/include/**",
+                "/home/arrel/gits/zephyr-projects/zephyr/**"
+            ],
+            "defines": [],
+            "compilerPath": "/home/arrel/gits/zephyr-projects/zephyr-sdk-0.17.4/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-riscv64",
+            "compileCommands": "${workspaceFolder}/../../build_supermini/compile_commands.json"
+        }
+    ],
+    "version": 4
+}
