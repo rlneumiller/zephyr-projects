@@ -17,6 +17,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/wifi.h>
 #include <zephyr/net/wifi_mgmt.h>
@@ -31,16 +32,9 @@ LOG_MODULE_REGISTER(wifi_uart_bridge, LOG_LEVEL_INF);
 #define WIFI_SSID "2.4-voda"
 #define WIFI_PRE_SHARED_KEY  "5E7HAwbB4K" // If you live nearby you're welcome to use our WiFi, but please be mindful of bandwidth usage as it's a residential connection!
 #define BRIDGE_PORT 8080
-#define WEB_SERVER_PORT 80
 #define RING_BUF_SIZE 1024
-#define WEB_SERVER_STACK_SIZE 4096
-#define WEB_SERVER_PRIORITY 7
 #define TCP_SERVER_STACK_SIZE 4096
 #define TCP_SERVER_PRIORITY 7
-#define WEB_SERVER_REQ_BUF_SIZE 192
-#define WEB_SERVER_BODY_BUF_SIZE 512
-#define WEB_SERVER_HTML_BUF_SIZE 2048
-#define WEB_SERVER_RESP_BUF_SIZE 4096
 #define CMD_RESPONSE_BUF_SIZE 2048
 #define CMD_RECV_TIMEOUT_MS 5000
 
@@ -72,54 +66,33 @@ static void log_printer_data(uint8_t *buf, size_t len)
 	}
 }
 
-const struct device *uart_dev = DEVICE_DT_GET(DT_ALIAS(bridge_uart));
-static int client_socket = -1;
-static uint32_t last_printer_activity_ms = 0;
+/* use the dedicated hardware UART (uart0 via bridge-uart alias) for the bridge,
+ * leaving usb_serial for the system console and logs. */
+#define UART_DEVICE_NODE DT_ALIAS(bridge_uart)
 
-static bool command_response_pending = false;
+const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
+int client_socket = -1;
+uint32_t last_printer_activity_ms = 0;
+
+bool command_response_pending = false; /* accessed by web server when sending M115 */
 
 static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
 static K_SEM_DEFINE(wifi_connected, 0, 1);
 static K_SEM_DEFINE(ipv4_address_obtained, 0, 1);
-K_THREAD_STACK_DEFINE(web_server_stack, WEB_SERVER_STACK_SIZE);
-static struct k_thread web_server_thread_data;
+
+/* TCP server thread resources */
 K_THREAD_STACK_DEFINE(tcp_server_stack, TCP_SERVER_STACK_SIZE);
 static struct k_thread tcp_server_thread_data;
 
-// Avoid requiring stack allocations in the web server thread for handling requests by using global buffers.
-static char web_server_req_buf[WEB_SERVER_REQ_BUF_SIZE];
-static char web_server_body_buf[WEB_SERVER_BODY_BUF_SIZE];
-static char web_server_html_buf[WEB_SERVER_HTML_BUF_SIZE];
-static char web_server_resp_buf[WEB_SERVER_RESP_BUF_SIZE];
-
 // keep last IPv4 string so we can print it after a reset/boot
-static char device_ip[NET_IPV4_ADDR_LEN];
+char device_ip[NET_IPV4_ADDR_LEN];
 
-static bool wifi_is_connected;
+bool wifi_is_connected;
 static int wifi_connect_result = -ETIMEDOUT;
 
-static size_t get_web_server_stack_usage(void)
-{
-	size_t unused = 0;
-	k_thread_stack_space_get(&web_server_thread_data, &unused);
-	return WEB_SERVER_STACK_SIZE - unused;
-}
-
-static int send_all(int sock, const char *buf, size_t len)
-{
-	size_t sent = 0;
-
-	while (sent < len) {
-		int ret = zsock_send(sock, buf + sent, len - sent, 0);
-		if (ret <= 0) {
-			return -1;
-		}
-		sent += ret;
-	}
-
-	return 0;
-}
+/* Internal temperature sensor device */
+static const struct device *temp_sensor = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(coretemp));
 
 static void log_wifi_iface_state(struct net_if *iface)
 {
@@ -131,6 +104,77 @@ static void log_wifi_iface_state(struct net_if *iface)
 
 	if (net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status)) == 0) {
 		LOG_INF("WiFi state: %s", wifi_state_txt(status.state));
+	}
+}
+
+static void post_temperature_to_web_server(int temp_int, int temp_frac)
+{
+	/* POST temperature data to web server at localhost:80 */
+	int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock < 0) {
+		LOG_DBG("Failed to create socket for temperature POST: %d", errno);
+		return;
+	}
+
+	struct sockaddr_in server_addr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(80),
+		.sin_addr.s_addr = htonl(0x7f000001),  /* 127.0.0.1 in network byte order */
+	};
+
+	if (zsock_connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+		LOG_DBG("Failed to connect to web server: %d", errno);
+		zsock_close(sock);
+		return;
+	}
+
+	char post_body[64];
+	int body_len = snprintk(post_body, sizeof(post_body), "tempInt=%d&tempFrac=%d", temp_int, temp_frac);
+
+	char post_request[256];
+	int req_len = snprintk(post_request, sizeof(post_request),
+		"POST /temperature HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"Content-Type: application/x-www-form-urlencoded\r\n"
+		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
+		"\r\n"
+		"%s",
+		body_len, post_body);
+
+	/* send the POST request */
+	if (zsock_send(sock, post_request, req_len, 0) >= 0) {
+		LOG_INF("Temperature posted to web server: %d.%02d°C", temp_int, temp_frac);
+	} else {
+		LOG_WRN("Failed to send POST request: %d", errno);
+	}
+
+	zsock_close(sock);
+}
+
+static void read_and_log_chip_temperature(void)
+{
+	if (temp_sensor == NULL || !device_is_ready(temp_sensor)) {
+		LOG_DBG("Temperature sensor not available");
+		return;
+	}
+
+	struct sensor_value temperature;
+	int ret = sensor_sample_fetch(temp_sensor);
+	if (ret != 0) {
+		LOG_DBG("Failed to fetch temperature: %d", ret);
+		return;
+	}
+
+	ret = sensor_channel_get(temp_sensor, SENSOR_CHAN_DIE_TEMP, &temperature);
+	if (ret == 0) {
+		int temp_int = temperature.val1;
+		int temp_frac = temperature.val2 / 100000; /* convert to 2 decimal places */
+		LOG_INF("ESP32-C3 Internal Temp: %d.%02d°C", temp_int, temp_frac);
+		/* POST the temperature data to web server */
+		post_temperature_to_web_server(temp_int, temp_frac);
+	} else {
+		LOG_DBG("Failed to read temperature: %d", ret);
 	}
 }
 
@@ -226,195 +270,13 @@ static void handle_ipv4_result(struct net_if *iface)
 			/* remember it for later and print now */
 			strncpy(device_ip, buf, sizeof(device_ip) - 1);
 			device_ip[sizeof(device_ip) - 1] = '\0';
-			//LOG_INF("handle_ipv4_result: Our device IPv4 address: %s", buf);
+			LOG_INF("handle_ipv4_result: Our device IPv4 address: %s", buf);
 			k_sem_give(&ipv4_address_obtained);
 			break;
 		}
 	}
 }
 
-// Web Status Server
-static void web_server_thread(void *arg1, void *arg2, void *arg3)
-{
-	ARG_UNUSED(arg1);
-	ARG_UNUSED(arg2);
-	ARG_UNUSED(arg3);
-
-	int serv_sock;
-	struct sockaddr_in bind_addr = {
-		.sin_family = AF_INET,
-		.sin_port = htons(WEB_SERVER_PORT),
-		.sin_addr = {.s_addr = htonl(INADDR_ANY)},
-	};
-
-	serv_sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (serv_sock < 0) {
-		LOG_ERR("Web server socket create failed: %d", errno);
-		return;
-	}
-
-	if (zsock_bind(serv_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-		LOG_ERR("Web server bind failed: %d", errno);
-		zsock_close(serv_sock);
-		return;
-	}
-
-	if (zsock_listen(serv_sock, 2) < 0) {
-		LOG_ERR("Web server listen failed: %d", errno);
-		zsock_close(serv_sock);
-		return;
-	}
-
-	LOG_INF("Web status server listening on port %d", WEB_SERVER_PORT);
-
-	while (1) {
-		int conn_sock;
-		struct sockaddr_in client_addr;
-		socklen_t client_addr_len = sizeof(client_addr);
-		bool is_status_path = false;
-		bool is_root_path = false;
-		bool is_send_m115_path = false;
-		int req_len;
-		int body_len;
-		int html_len;
-		int resp_len;
-		conn_sock = zsock_accept(serv_sock, (struct sockaddr *)&client_addr, &client_addr_len);
-		if (conn_sock < 0) {
-			LOG_ERR("Web server accept failed: %d", errno);
-			continue;
-		}
-
-		req_len = zsock_recv(conn_sock, web_server_req_buf, WEB_SERVER_REQ_BUF_SIZE - 1, 0);
-		if (req_len <= 0) {
-			zsock_close(conn_sock);
-			continue;
-		}
-		web_server_req_buf[req_len] = '\0';
-
-		if (strncmp(web_server_req_buf, "GET /status", 11) == 0) {
-			is_status_path = true;
-		} else if (strncmp(web_server_req_buf, "GET / ", 6) == 0) {
-			is_root_path = true;
-		} else if (strncmp(web_server_req_buf, "GET /send_m115", 14) == 0) {
-			is_send_m115_path = true;
-		}
-
-		if (is_status_path) {
-			snprintk(web_server_body_buf, sizeof(web_server_body_buf),
-				"{\"device_ip\":\"%s\",\"wifi_connected\":%s,\"bridge_client_connected\":%s,\"last_printer_activity_ms\":%u,\"web_stack_used_bytes\":%zu}\n",
-				device_ip[0] ? device_ip : "0.0.0.0",
-				wifi_is_connected ? "true" : "false",
-				client_socket >= 0 ? "true" : "false",
-				last_printer_activity_ms,
-				get_web_server_stack_usage());
-			body_len = strlen(web_server_body_buf);
-
-			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/json\r\n"
-				"Connection: close\r\n"
-				"Content-Length: %d\r\n\r\n"
-				"%s",
-				body_len, web_server_body_buf);
-			resp_len = strlen(web_server_resp_buf);
-		} else if (is_root_path) {
-			uint32_t now = k_uptime_get_32();
-			uint32_t last_activity = last_printer_activity_ms;
-			char last_activity_str[64];
-			
-			if (last_activity == 0) {
-				strcpy(last_activity_str, "Never");
-			} else {
-				uint32_t diff = (now - last_activity) / 1000;
-				snprintk(last_activity_str, sizeof(last_activity_str), "%u seconds ago", diff);
-			}
-
-			snprintk(web_server_html_buf, sizeof(web_server_html_buf),
-				"<!doctype html><html><head><meta charset=\"utf-8\"><title>WiFi UART Bridge Status</title></head>"
-				"<body><h1>WiFi UART Bridge</h1>"
-				"<p><strong>Device IP:</strong> %s</p>"
-				"<p><strong>WiFi Connected:</strong> %s</p>"
-				"<p><strong>Bridge Client (Octoprint?) Connected:</strong> %s</p>"
-				"<p><strong>Last Printer Response:</strong> %s</p>"
-				"<p>JSON endpoint: <a href=\"/status\">/status</a></p>"
-				"<p><button onclick=\"sendM115()\">Send M115</button></p>"
-				"<div id=\"response\"></div>"
-				"<script>"
-				"function sendM115(){"
-				"  document.getElementById('response').textContent='Sending...';"
-				"  fetch('/send_m115').then(r=>r.text()).then(d=>{"
-				"    document.getElementById('response').textContent=d;"
-				"    location.reload();"
-				"  });"
-				"}"
-				"setInterval(() => { if(document.getElementById('response').textContent==='') location.reload(); }, 5000);"
-				"</script>"
-				"</body></html>",
-				device_ip[0] ? device_ip : "0.0.0.0",
-				wifi_is_connected ? "true" : "false",
-				client_socket >= 0 ? "true" : "false",
-				last_activity_str);
-			html_len = strlen(web_server_html_buf);
-
-			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: text/html; charset=utf-8\r\n"
-				"Connection: close\r\n"
-				"Content-Length: %d\r\n\r\n"
-				"%s",
-				html_len, web_server_html_buf);
-			resp_len = strlen(web_server_resp_buf);
-		} else if (is_send_m115_path) {
-			// Send M115 command and collect response
-			ring_buf_reset(&cmd_response_ringbuf);
-			const char *cmd = "M115\n";
-			ring_buf_put(&tcp_rx_ringbuf, (uint8_t *)cmd, strlen(cmd));
-			uart_irq_tx_enable(uart_dev);
-			command_response_pending = true;
-			uint32_t start_time = k_uptime_get();
-			uint8_t resp_buf[CMD_RESPONSE_BUF_SIZE];
-			size_t resp_len_local = 0;
-			while (k_uptime_get() - start_time < CMD_RECV_TIMEOUT_MS && resp_len_local < CMD_RESPONSE_BUF_SIZE) {
-				uint32_t len = ring_buf_get(&cmd_response_ringbuf, resp_buf + resp_len_local, CMD_RESPONSE_BUF_SIZE - resp_len_local);
-				if (len > 0) {
-					resp_len_local += len;
-					start_time = k_uptime_get(); // reset timeout on data
-				}
-				k_sleep(K_MSEC(10));
-			}
-			command_response_pending = false;
-			// Send response
-			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: text/plain\r\n"
-				"Connection: close\r\n"
-				"Content-Length: %zu\r\n\r\n",
-				resp_len_local);
-			size_t header_len = strlen(web_server_resp_buf);
-			if (header_len + resp_len_local <= sizeof(web_server_resp_buf)) {
-				memcpy(web_server_resp_buf + header_len, resp_buf, resp_len_local);
-				resp_len = header_len + resp_len_local;
-			} else {
-				// Fallback if too big, but shouldn't happen
-				resp_len = 0;
-			}
-		} else {
-			snprintk(web_server_resp_buf, sizeof(web_server_resp_buf),
-				"HTTP/1.1 404 Not Found\r\n"
-				"Content-Type: text/plain\r\n"
-				"Connection: close\r\n"
-				"Content-Length: 10\r\n\r\n"
-				"Not Found\n");
-			resp_len = strlen(web_server_resp_buf);
-		}
-
-		if (resp_len > 0) {
-			send_all(conn_sock, web_server_resp_buf, (size_t)resp_len);
-		}
-
-		zsock_close(conn_sock);
-	}
-}
 
 static void net_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 				   uint64_t mgmt_event, struct net_if *iface)
@@ -583,13 +445,17 @@ static void tcp_server_thread(void *arg1, void *arg2, void *arg3)
 
 		LOG_INF("Bridge Client (Octoprint?)connected on port %d", BRIDGE_PORT);
 
+		// Clear any stale data from previous sessions or before connection
+		ring_buf_reset(&uart_rx_ringbuf);
+		ring_buf_reset(&tcp_rx_ringbuf);
+
 		while (1) {
 			uint8_t rx_buf[128];
 			
 			// 1. Read from TCP, write to UART ringbuf
 			int len = zsock_recv(client_socket, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT);
 			if (len > 0) {
-				LOG_INF("TCP (Octoprint?) -> UART (Printer): %d bytes", len);
+				LOG_INF("TCP (Octoprint?) -> UART (Printer): %d bytes: %.*s", len, len, rx_buf);
 				ring_buf_put(&tcp_rx_ringbuf, rx_buf, len);
 				uart_irq_tx_enable(uart_dev);
 			} else if (len == 0 || (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
@@ -652,16 +518,6 @@ int main(void)
 		LOG_INF("We failed to obtain an IPv4 address!");
 	}
 
- 	k_thread_create(&web_server_thread_data,
-				web_server_stack,
-				K_THREAD_STACK_SIZEOF(web_server_stack),
-				web_server_thread,
-				NULL, NULL, NULL,
-				WEB_SERVER_PRIORITY,
-				0,
-				K_NO_WAIT);
-	k_thread_name_set(&web_server_thread_data, "web_status_server");
-
 	k_thread_create(&tcp_server_thread_data,
 				tcp_server_stack,
 				K_THREAD_STACK_SIZEOF(tcp_server_stack),
@@ -672,13 +528,14 @@ int main(void)
 				K_NO_WAIT);
 	k_thread_name_set(&tcp_server_thread_data, "tcp_bridge_server");
 
-	// Log stack usage periodically from the main loop
+	// simple idle loop with periodic temperature logging
+	uint32_t last_temp_log = k_uptime_get_32();
 	while (1) {
-		size_t used = get_web_server_stack_usage();
-		LOG_INF("Web server stack usage: %zu/%d bytes (%zu%%)", 
-			used, 
-			WEB_SERVER_STACK_SIZE,
-			(used * 100) / WEB_SERVER_STACK_SIZE);
+		uint32_t now = k_uptime_get_32();
+		if (now - last_temp_log >= 10000) { /* log every 10 seconds */
+			read_and_log_chip_temperature();
+			last_temp_log = now;
+		}
 		k_sleep(K_SECONDS(10));
 	}
 
