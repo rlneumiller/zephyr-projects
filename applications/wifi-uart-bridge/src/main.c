@@ -66,22 +66,22 @@ static void log_printer_data(uint8_t *buf, size_t len)
 	}
 }
 
-/* use the dedicated hardware UART (uart0 via bridge-uart alias) for the bridge,
- * leaving usb_serial for the system console and logs. */
+// Use the dedicated hardware UART (uart0 via bridge-uart alias) for the bridge,
+// leaving usb_serial for the system console and logs.
 #define UART_DEVICE_NODE DT_ALIAS(bridge_uart)
 
 const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 int client_socket = -1;
 uint32_t last_printer_activity_ms = 0;
 
-bool command_response_pending = false; /* accessed by web server when sending M115 */
+bool command_response_pending = false; // accessed by web server when sending M115
 
 static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
 static K_SEM_DEFINE(wifi_connected, 0, 1);
 static K_SEM_DEFINE(ipv4_address_obtained, 0, 1);
 
-/* TCP server thread resources */
+// TCP server thread resources
 K_THREAD_STACK_DEFINE(tcp_server_stack, TCP_SERVER_STACK_SIZE);
 static struct k_thread tcp_server_thread_data;
 
@@ -91,7 +91,7 @@ char device_ip[NET_IPV4_ADDR_LEN];
 bool wifi_is_connected;
 static int wifi_connect_result = -ETIMEDOUT;
 
-/* Internal temperature sensor device */
+// Internal temperature sensor device
 static const struct device *temp_sensor = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(coretemp));
 
 static void log_wifi_iface_state(struct net_if *iface)
@@ -109,7 +109,7 @@ static void log_wifi_iface_state(struct net_if *iface)
 
 static void post_temperature_to_web_server(int temp_int, int temp_frac)
 {
-	/* POST temperature data to web server at localhost:80 */
+	// POST temperature data to web server at localhost:80
 	int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock < 0) {
 		LOG_DBG("Failed to create socket for temperature POST: %d", errno);
@@ -119,7 +119,7 @@ static void post_temperature_to_web_server(int temp_int, int temp_frac)
 	struct sockaddr_in server_addr = {
 		.sin_family = AF_INET,
 		.sin_port = htons(80),
-		.sin_addr.s_addr = htonl(0x7f000001),  /* 127.0.0.1 in network byte order */
+		.sin_addr.s_addr = htonl(0x7f000001),  // 127.0.0.1 in network byte order
 	};
 
 	if (zsock_connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
@@ -142,7 +142,7 @@ static void post_temperature_to_web_server(int temp_int, int temp_frac)
 		"%s",
 		body_len, post_body);
 
-	/* send the POST request */
+	// Send the POST request
 	if (zsock_send(sock, post_request, req_len, 0) >= 0) {
 		LOG_INF("Temperature posted to web server: %d.%02d°C", temp_int, temp_frac);
 	} else {
@@ -169,9 +169,9 @@ static void read_and_log_chip_temperature(void)
 	ret = sensor_channel_get(temp_sensor, SENSOR_CHAN_DIE_TEMP, &temperature);
 	if (ret == 0) {
 		int temp_int = temperature.val1;
-		int temp_frac = temperature.val2 / 100000; /* convert to 2 decimal places */
+		int temp_frac = temperature.val2 / 100000; // Convert to 2 decimal places
 		LOG_INF("ESP32-C3 Internal Temp: %d.%02d°C", temp_int, temp_frac);
-		/* POST the temperature data to web server */
+		// POST the temperature data to web server
 		post_temperature_to_web_server(temp_int, temp_frac);
 	} else {
 		LOG_DBG("Failed to read temperature: %d", ret);
@@ -267,7 +267,7 @@ static void handle_ipv4_result(struct net_if *iface)
 			net_addr_ntop(AF_INET,
 					  &iface->config.ip.ipv4->unicast[i].ipv4.address.in_addr,
 					  buf, sizeof(buf));
-			/* remember it for later and print now */
+			// Remember it for later and print now
 			strncpy(device_ip, buf, sizeof(device_ip) - 1);
 			device_ip[sizeof(device_ip) - 1] = '\0';
 			LOG_INF("handle_ipv4_result: Our device IPv4 address: %s", buf);
@@ -528,11 +528,11 @@ int main(void)
 				K_NO_WAIT);
 	k_thread_name_set(&tcp_server_thread_data, "tcp_bridge_server");
 
-	// simple idle loop with periodic temperature logging
+	// Simple idle loop with periodic temperature logging
 	uint32_t last_temp_log = k_uptime_get_32();
 	while (1) {
 		uint32_t now = k_uptime_get_32();
-		if (now - last_temp_log >= 10000) { /* log every 10 seconds */
+		if (now - last_temp_log >= 10000) { // Log every 10 seconds
 			read_and_log_chip_temperature();
 			last_temp_log = now;
 		}
