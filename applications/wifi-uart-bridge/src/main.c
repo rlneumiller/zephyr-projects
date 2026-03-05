@@ -107,51 +107,6 @@ static void log_wifi_iface_state(struct net_if *iface)
 	}
 }
 
-static void post_temperature_to_web_server(int temp_int, int temp_frac)
-{
-	// POST temperature data to web server at localhost:80
-	int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock < 0) {
-		LOG_DBG("Failed to create socket for temperature POST: %d", errno);
-		return;
-	}
-
-	struct sockaddr_in server_addr = {
-		.sin_family = AF_INET,
-		.sin_port = htons(80),
-		.sin_addr.s_addr = htonl(0x7f000001),  // 127.0.0.1 in network byte order
-	};
-
-	if (zsock_connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-		LOG_DBG("Failed to connect to web server: %d", errno);
-		zsock_close(sock);
-		return;
-	}
-
-	char post_body[64];
-	int body_len = snprintk(post_body, sizeof(post_body), "tempInt=%d&tempFrac=%d", temp_int, temp_frac);
-
-	char post_request[256];
-	int req_len = snprintk(post_request, sizeof(post_request),
-		"POST /temperature HTTP/1.1\r\n"
-		"Host: localhost\r\n"
-		"Content-Type: application/x-www-form-urlencoded\r\n"
-		"Content-Length: %d\r\n"
-		"Connection: close\r\n"
-		"\r\n"
-		"%s",
-		body_len, post_body);
-
-	// Send the POST request
-	if (zsock_send(sock, post_request, req_len, 0) >= 0) {
-		LOG_INF("Temperature posted to web server: %d.%02d°C", temp_int, temp_frac);
-	} else {
-		LOG_WRN("Failed to send POST request: %d", errno);
-	}
-
-	zsock_close(sock);
-}
-
 static void read_and_log_chip_temperature(void)
 {
 	if (temp_sensor == NULL || !device_is_ready(temp_sensor)) {
@@ -171,8 +126,7 @@ static void read_and_log_chip_temperature(void)
 		int temp_int = temperature.val1;
 		int temp_frac = temperature.val2 / 100000; // Convert to 2 decimal places
 		LOG_INF("ESP32-C3 Internal Temp: %d.%02d°C", temp_int, temp_frac);
-		// POST the temperature data to web server
-		post_temperature_to_web_server(temp_int, temp_frac);
+
 	} else {
 		LOG_DBG("Failed to read temperature: %d", ret);
 	}
