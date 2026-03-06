@@ -11,6 +11,15 @@
 	pinctrl-names = "default";
 };
 
+/* Disable uart power management
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-names = "default";
+	zephyr,pm-device-disabled;
+};
+*/
 &spi2 {
 	status = "disabled";
 };
@@ -27,3 +36,13 @@
 		};
 	};
 };
+
+&wifi {
+/* use board defaults */
+}
+
+/* Disable Wifi power management
+&wifi {
+    zephyr,pm-device-disabled;
+};
+*/
