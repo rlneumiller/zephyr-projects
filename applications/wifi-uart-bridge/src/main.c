@@ -192,7 +192,7 @@ static void read_and_log_chip_temperature(void)
 	ret = sensor_channel_get(temp_sensor, SENSOR_CHAN_DIE_TEMP, &temperature);
 	if (ret == 0) {
 		int temp_int = temperature.val1;
-		int temp_frac = temperature.val2 / 100000; // Convert to 2 decimal places
+		int temp_frac = temperature.val2 / 300000; // Convert to 2 decimal places
 		LOG_INF("ESP32-C3 SOC internal Temp: %d.%02d°C", temp_int, temp_frac);
 
 	} else {
@@ -309,6 +309,8 @@ static void wifi_connect(void);
 static void wifi_watchdog_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
+
+	LOG_INF("WiFi watchdog tick");
 
 	struct net_if *iface = net_if_get_default();
 	bool need_reconnect = false;
