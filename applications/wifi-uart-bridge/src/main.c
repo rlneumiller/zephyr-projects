@@ -36,13 +36,13 @@ LOG_MODULE_REGISTER(wifi_uart_bridge, LOG_LEVEL_INF);
 #define RING_BUF_SIZE 1024
 #define TCP_SERVER_STACK_SIZE 4096
 #define TCP_SERVER_PRIORITY 7
-#define CMD_RESPONSE_BUF_SIZE 2048
+//#define CMD_RESPONSE_BUF_SIZE 2048
 #define CMD_RECV_TIMEOUT_MS 5000
 
 // Globals
 RING_BUF_DECLARE(uart_rx_ringbuf, RING_BUF_SIZE);
 RING_BUF_DECLARE(tcp_rx_ringbuf, RING_BUF_SIZE);
-RING_BUF_DECLARE(cmd_response_ringbuf, CMD_RESPONSE_BUF_SIZE);
+//RING_BUF_DECLARE(cmd_response_ringbuf, CMD_RESPONSE_BUF_SIZE);
 
 static void log_printer_data(uint8_t *buf, size_t len)
 {
@@ -75,7 +75,7 @@ const struct device *uart_dev = DEVICE_DT_GET(UART_DEVICE_NODE);
 int client_socket = -1;
 uint32_t last_printer_activity_ms = 0;
 
-bool command_response_pending = false; // accessed by web server when sending M115
+//bool command_response_pending = false; // accessed by web server when sending M115
 
 static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
@@ -121,12 +121,13 @@ static bool wifi_check_rssi(struct net_if *iface)
 		return false;
 	}
 
-	/* Unsigned int or 0 could indicate invalid/unknown. */
-	LOG_DBG("WiFi watchdog: RSSI %d dBm", status.rssi);
-	if (status.rssi == 0) {
+	/* If we are not associated, the RSSI value is not meaningful. */
+	if (status.state < WIFI_STATE_ASSOCIATED) {
+		LOG_DBG("WiFi watchdog: iface state %s (not associated)", wifi_state_txt(status.state));
 		return false;
 	}
 
+	LOG_DBG("WiFi watchdog: RSSI %d dBm", status.rssi);
 	return (status.rssi > WIFI_WATCHDOG_MIN_RSSI_DBM);
 }
 
@@ -212,9 +213,9 @@ static void uart_isr(const struct device *dev, void *user_data)
 		if (len > 0) {
 			last_printer_activity_ms = k_uptime_get_32();
 			ring_buf_put(&uart_rx_ringbuf, buffer, len);
-			if (command_response_pending) {
-				ring_buf_put(&cmd_response_ringbuf, buffer, len);
-			}
+			// if (command_response_pending) {
+			// 	ring_buf_put(&cmd_response_ringbuf, buffer, len);
+			// }
 		}
 	}
 
