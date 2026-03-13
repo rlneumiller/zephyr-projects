@@ -13,6 +13,7 @@
  // support for multiple clients.
  //////////////////////////////////////////////////////////////////////////////
 
+#include <zephyr/sys/atomic.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/device.h>
@@ -91,8 +92,74 @@ char device_ip[NET_IPV4_ADDR_LEN];
 bool wifi_is_connected;
 static int wifi_connect_result = -ETIMEDOUT;
 
+/* Watchdog: periodically check WiFi connectivity and reconnect if needed */
+#define WIFI_WATCHDOG_INTERVAL_MS 30000
+
+/* TCP connectivity check (to detect “captive portal / no upstream” cases). */
+#define WIFI_WATCHDOG_TCP_CHECK_ADDR "1.1.1.1"
+#define WIFI_WATCHDOG_TCP_CHECK_PORT 53
+#define WIFI_WATCHDOG_TCP_CHECK_TIMEOUT_MS 1500
+
+/* RSSI check: force reconnect if signal is too weak (or missing). */
+#define WIFI_WATCHDOG_MIN_RSSI_DBM (-75)
+
+static atomic_t wifi_reconnect_in_progress = ATOMIC_INIT(0);
+static struct k_work_delayable wifi_watchdog_work;
+
+static bool wifi_check_rssi(struct net_if *iface)
+{
+	struct wifi_iface_status status = {0};
+	int ret;
+
+	if (!iface) {
+		return false;
+	}
+
+	ret = net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status));
+	if (ret != 0) {
+		LOG_DBG("WiFi watchdog: could not get iface status (%d)", ret);
+		return false;
+	}
+
+	/* Unsigned int or 0 could indicate invalid/unknown. */
+	LOG_DBG("WiFi watchdog: RSSI %d dBm", status.rssi);
+	if (status.rssi == 0) {
+		return false;
+	}
+
+	return (status.rssi > WIFI_WATCHDOG_MIN_RSSI_DBM);
+}
+
 // Internal temperature sensor device
 static const struct device *temp_sensor = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(coretemp));
+
+static bool wifi_check_tcp_connectivity(void)
+{
+	struct sockaddr_in remote = {0};
+	int sock;
+	struct timeval tv = {
+		.tv_sec = WIFI_WATCHDOG_TCP_CHECK_TIMEOUT_MS / 1000,
+		.tv_usec = (WIFI_WATCHDOG_TCP_CHECK_TIMEOUT_MS % 1000) * 1000,
+	};
+
+	if (net_addr_pton(AF_INET, WIFI_WATCHDOG_TCP_CHECK_ADDR, &remote.sin_addr) != 0) {
+		return false;
+	}
+	remote.sin_family = AF_INET;
+	remote.sin_port = htons(WIFI_WATCHDOG_TCP_CHECK_PORT);
+
+	sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock < 0) {
+		return false;
+	}
+
+	zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	zsock_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+	int ret = zsock_connect(sock, (struct sockaddr *)&remote, sizeof(remote));
+	zsock_close(sock);
+	return (ret == 0);
+}
 
 static void log_wifi_iface_state(struct net_if *iface)
 {
@@ -125,7 +192,7 @@ static void read_and_log_chip_temperature(void)
 	if (ret == 0) {
 		int temp_int = temperature.val1;
 		int temp_frac = temperature.val2 / 100000; // Convert to 2 decimal places
-		LOG_INF("ESP32-C3 Internal Temp: %d.%02d°C", temp_int, temp_frac);
+		LOG_INF("ESP32-C3 SOC internal Temp: %d.%02d°C", temp_int, temp_frac);
 
 	} else {
 		LOG_DBG("Failed to read temperature: %d", ret);
@@ -198,6 +265,7 @@ static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb)
 	const struct wifi_status *status;
 
 	wifi_is_connected = false;
+	device_ip[0] = '\0';
 
 	if (cb->info == NULL || cb->info_length < sizeof(struct wifi_status)) {
 		LOG_WRN("WiFi disconnect event");
@@ -210,6 +278,9 @@ static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb)
 	} else {
 		LOG_WRN("WiFi disconnected");
 	}
+
+	/* Trigger a reconnect ASAP via the watchdog. */
+	k_work_schedule(&wifi_watchdog_work, K_NO_WAIT);
 }
 
 static void handle_ipv4_result(struct net_if *iface)
@@ -231,6 +302,44 @@ static void handle_ipv4_result(struct net_if *iface)
 	}
 }
 
+/* Forward declarations */
+static void wifi_connect(void);
+
+static void wifi_watchdog_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	struct net_if *iface = net_if_get_default();
+	bool need_reconnect = false;
+
+	/* If we're not connected or we don't have an IP, attempt a reconnect. */
+	if (!wifi_is_connected || device_ip[0] == '\0') {
+		need_reconnect = true;
+	} else if (iface && !net_if_is_up(iface)) {
+		need_reconnect = true;
+	} else if (!wifi_check_tcp_connectivity()) {
+		LOG_WRN("WiFi watchdog: TCP test failed, network may be broken");
+		need_reconnect = true;
+	} else if (!wifi_check_rssi(iface)) {
+		LOG_WRN("WiFi watchdog: RSSI too low or unknown, restarting radio");
+		need_reconnect = true;
+	}
+
+	if (need_reconnect) {
+		if (atomic_cas(&wifi_reconnect_in_progress, 0, 1) == 0) {
+			LOG_WRN("WiFi watchdog: network down, attempting reconnect");
+			if (iface) {
+				net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+			}
+			wifi_connect();
+			atomic_set(&wifi_reconnect_in_progress, 0);
+		} else {
+			LOG_DBG("WiFi watchdog: reconnect already in progress");
+		}
+	}
+
+	k_work_schedule(&wifi_watchdog_work, K_MSEC(WIFI_WATCHDOG_INTERVAL_MS));
+}
 
 static void net_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 				   uint64_t mgmt_event, struct net_if *iface)
@@ -267,15 +376,6 @@ static void wifi_connect(void)
 		LOG_ERR("No default network interface available");
 		return;
 	}
-
-	net_mgmt_init_event_callback(&wifi_cb, net_mgmt_event_handler,
-				     NET_EVENT_WIFI_CONNECT_RESULT |
-				     NET_EVENT_WIFI_DISCONNECT_RESULT);
-	net_mgmt_add_event_callback(&wifi_cb);
-
-	net_mgmt_init_event_callback(&ipv4_cb, net_mgmt_event_handler,
-				     NET_EVENT_IPV4_ADDR_ADD);
-	net_mgmt_add_event_callback(&ipv4_cb);
 
 	wifi_params.ssid = WIFI_SSID;
 	wifi_params.ssid_length = strlen(WIFI_SSID);
@@ -459,7 +559,28 @@ int main(void)
 	uart_irq_callback_set(uart_dev, uart_isr);
 	uart_irq_rx_enable(uart_dev);
 
+	/* Initialize the watchdog work before registering callbacks, so the disconnect handler
+	 * can safely reschedule it if needed.
+	 */
+	k_work_init_delayable(&wifi_watchdog_work, wifi_watchdog_handler);
+
+	/* Register for WiFi and IPv4 events once (do not re-register on reconnect). */
+	net_mgmt_init_event_callback(&wifi_cb, net_mgmt_event_handler,
+				     NET_EVENT_WIFI_CONNECT_RESULT |
+				     NET_EVENT_WIFI_DISCONNECT_RESULT);
+	net_mgmt_add_event_callback(&wifi_cb);
+
+	net_mgmt_init_event_callback(&ipv4_cb, net_mgmt_event_handler,
+				     NET_EVENT_IPV4_ADDR_ADD);
+	net_mgmt_add_event_callback(&ipv4_cb);
+
+	/* Ensure only one connect/reconnect is running at a time. */
+	atomic_set(&wifi_reconnect_in_progress, 1);
 	wifi_connect();
+	atomic_set(&wifi_reconnect_in_progress, 0);
+
+	/* Start watchdog that will reset the network stack if the WiFi drops. */
+	k_work_schedule(&wifi_watchdog_work, K_MSEC(WIFI_WATCHDOG_INTERVAL_MS));
 
 	 // after a reboot we may want the IP address up front along with the boot
 	 // messages; wifi_connect already logs the address when it's obtained,
