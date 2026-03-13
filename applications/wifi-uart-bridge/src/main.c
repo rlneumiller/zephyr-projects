@@ -106,6 +106,23 @@ static int wifi_connect_result = -ETIMEDOUT;
 static atomic_t wifi_reconnect_in_progress = ATOMIC_INIT(0);
 static struct k_work_delayable wifi_watchdog_work;
 
+static const char *wifi_rssi_quality(int rssi)
+{
+	if (rssi >= -50) {
+		return "excellent";
+	} else if (rssi >= -60) {
+		return "very good";
+	} else if (rssi >= -67) {
+		return "good";
+	} else if (rssi >= -70) {
+		return "fair";
+	} else if (rssi >= -80) {
+		return "weak";
+	} else {
+		return "poor";
+	}
+}
+
 static bool wifi_check_rssi(struct net_if *iface)
 {
 	struct wifi_iface_status status = {0};
@@ -127,8 +144,59 @@ static bool wifi_check_rssi(struct net_if *iface)
 		return false;
 	}
 
-	LOG_DBG("WiFi watchdog: RSSI %d dBm", status.rssi);
+	LOG_DBG("WiFi watchdog: RSSI %d dBm (%s)", status.rssi, wifi_rssi_quality(status.rssi));
 	return (status.rssi > WIFI_WATCHDOG_MIN_RSSI_DBM);
+}
+
+static const char *wifi_disconnect_reason_str(int reason)
+{
+	/* These are common IEEE 802.11 disconnection reason codes. */
+	switch (reason) {
+	case 0:
+		return "UNSPECIFIED";
+	case 1:
+		return "UNSPECIFIED";
+	case 2:
+		return "PREV_AUTH_NOT_VALID";
+	case 3:
+		return "DEAUTH_LEAVING";
+	case 4:
+		return "DISASSOC_DUE_TO_INACTIVITY";
+	case 5:
+		return "DISASSOC_AP_BUSY";
+	case 6:
+		return "CLASS2_FRAME_FROM_NONAUTH_STA";
+	case 7:
+		return "CLASS3_FRAME_FROM_NONASSOC_STA";
+	case 8:
+		return "DISASSOC_STA_HAS_LEFT";
+	case 9:
+		return "STA_REQ_ASSOC_WITHOUT_AUTH";
+	case 10:
+		return "UNSPECIFIED_QOS_REASON";
+	case 11:
+		return "NOT_AUTHED";
+	case 12:
+		return "NOT_ASSOCED";
+	case 13:
+		return "ASSOC_DENIED_REASON_UNSPEC";
+	case 14:
+		return "ASSOC_DENIED_NOT_SUPPORTED";
+	case 15:
+		return "ASSOC_DENIED_AP_BUSY";
+	case 16:
+		return "ASSOC_DENIED_SHORT_SLOT_TIME";
+	case 17:
+		return "ASSOC_DENIED_DSSS_PARAM";
+	case 18:
+		return "ASSOC_DENIED_NO_SHORT_PREAMBLE";
+	case 19:
+		return "ASSOC_DENIED_NO_HT";
+	case 23:
+		return "DISASSOC_STA_INITIATED";
+	default:
+		return "UNKNOWN_REASON";
+	}
 }
 
 // Internal temperature sensor device
@@ -275,9 +343,11 @@ static void handle_wifi_disconnect_result(struct net_mgmt_event_callback *cb)
 
 	status = (const struct wifi_status *)cb->info;
 	if (status->status) {
-		LOG_WRN("WiFi disconnected (reason %d)", status->status);
+		LOG_WRN("WiFi disconnected (reason %d = %s)", status->status,
+			 wifi_disconnect_reason_str(status->status));
 	} else {
-		LOG_WRN("WiFi disconnected");
+		LOG_WRN("WiFi disconnected (reason 0: %s)",
+			 wifi_disconnect_reason_str(status->status));
 	}
 
 	/* Trigger a reconnect ASAP via the watchdog. */
@@ -314,6 +384,15 @@ static void wifi_watchdog_handler(struct k_work *work)
 
 	struct net_if *iface = net_if_get_default();
 	bool need_reconnect = false;
+
+	/* Log the current RSSI and association state for visibility. */
+	if (iface && net_if_is_up(iface)) {
+		struct wifi_iface_status status = {0};
+		if (net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(status)) == 0) {
+			LOG_INF("WiFi status: %s, RSSI %d dBm (%s)", wifi_state_txt(status.state), status.rssi,
+				wifi_rssi_quality(status.rssi));
+		}
+	}
 
 	/* If we're not connected or we don't have an IP, attempt a reconnect. */
 	if (!wifi_is_connected || device_ip[0] == '\0') {
