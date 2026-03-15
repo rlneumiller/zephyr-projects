@@ -1,0 +1,22 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Basic board overlay for ESP32C3 Supermini + MAX3421E USB host.
+ *
+ * Update the GPIO numbers below to match actual wiring.
+ */
+
+&spi2 {
+	status = "okay";
+	/* Ensure pinctrl matches our wiring; default is spim2_default on this board. */
+
+	max3421e_spi: max3421e_spi@0 {
+		compatible = "maxim,max3421e-spi";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+
+		/* Update these to the GPIO pins we wired to MAX3421E: */
+		int-gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;    /* GPX (interrupt) */
+		reset-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;  /* RESET (optional) */
+	};
+};
