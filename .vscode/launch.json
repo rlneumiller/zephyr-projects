@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "name": "Debug esp32c3-supermini (OpenOCD)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/zephyr/zephyr.elf",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${workspaceFolder}/zephyr-sdk-0.17.4/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set GDB architecture",
+                    "text": "set architecture riscv:rv32",
+                    "ignoreFailures": false
+                },
+                {
+                    "description": "Connect to OpenOCD",
+                    "text": "target extended-remote localhost:3333",
+                    "ignoreFailures": false
+                },
+                {
+                    "description": "Load program",
+                    "text": "load",
+                    "ignoreFailures": false
+                },
+                {
+                    "description": "Reset target",
+                    "text": "monitor reset halt",
+                    "ignoreFailures": false
+                }
+            ]
+        }
+    ]
+}
