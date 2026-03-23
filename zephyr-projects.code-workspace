@@ -30,6 +30,10 @@
 		],
 		
 		"workbench.tree.indent": 20,
+		"[dts]": {
+			"editor.formatOnSave": true,
+			"editor.defaultFormatter": "KyleMicallefBonnici.dts-lsp"
+		},
 		"C_Cpp.default.includePath": [
 			"${workspaceFolder}/applications/wifi-uart-bridge/**",
 			"${workspaceFolder}/applications/esp32c3_supermini-uart0/**",
