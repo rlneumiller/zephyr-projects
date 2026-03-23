@@ -12,18 +12,19 @@
 	"settings": {
 		"devicetree.contexts": [
 			{
-				"dtsFile": "${workspaceFolder}/build/zephyr/zephyr.dts",
-				"cwd": "${workspaceFolder}",
-				"includePath": [
-					"${workspaceFolder}/zephyr/zephyr/dts",
-					"${workspaceFolder}/zephyr/zephyr/dts/bindings",
-					"${workspaceFolder}/zephyr/zephyr/include/zephyr/dt-bindings",
-					"${workspaceFolder}/zephyr/zephyr/boards",
-					"${workspaceFolder}/zephyr/zephyr/boards/*",
-					"${workspaceFolder}/zephyr",
-					"${workspaceFolder}/build/zephyr/include",
-					"${workspaceFolder}/build/zephyr/include/generated",
-					"${workspaceFolder}/build/zephyr"
+				"ctxName": "wifi-uart-bridge",
+				"cwd": "/home/arrel/gits/zephyr-projects",
+				"dtsFile": "/home/arrel/gits/zephyr-projects/zephyr/boards/others/esp32c3_supermini/esp32c3_supermini.dts",
+				"overlays": [
+					"/home/arrel/gits/zephyr-projects/applications/wifi-uart-bridge/boards/esp32c3_supermini.overlay"
+				],
+				"bindingType": "Zephyr",
+				"zephyrBindings": ["/home/arrel/gits/zephyr-projects/zephyr/dts/bindings"],
+				"includePaths": [
+					"/home/arrel/gits/zephyr-projects/zephyr/include",
+					"/home/arrel/gits/zephyr-projects/zephyr/dts/riscv",
+					"/home/arrel/gits/zephyr-projects/zephyr/dts/common",
+					"/home/arrel/gits/zephyr-projects/zephyr/dts/vendor"
 				]
 			}
 		],
