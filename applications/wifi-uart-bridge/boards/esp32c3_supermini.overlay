@@ -33,8 +33,9 @@
 	status = "disabled";
 };
 
+/* Follows Zephyr style guide - must use tabs not spaces in dts files */
 / {
-    aliases {
-        bridge-uart = &uart1;
-    };
+	aliases {
+		bridge-uart = &uart1;
+	};
 };
