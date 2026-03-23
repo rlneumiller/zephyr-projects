@@ -30,7 +30,7 @@
 		],
 		
 		"workbench.tree.indent": 20,
-		"[dts]": {
+		"[devicetree]": {
 			"editor.formatOnSave": true,
 			"editor.defaultFormatter": "KyleMicallefBonnici.dts-lsp"
 		},
